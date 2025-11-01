@@ -4,19 +4,33 @@ export function activate(context: vscode.ExtensionContext) {
     const diagnostics = vscode.languages.createDiagnosticCollection("odoo-linter");
     context.subscriptions.push(diagnostics);
 
+    let lintingTimeout: NodeJS.Timeout;
+
+    const triggerLinting = (document: vscode.TextDocument) => {
+        clearTimeout(lintingTimeout);
+        lintingTimeout = setTimeout(() => {
+            updateDiagnostics(document, diagnostics);
+        }, 500); // 500ms debounce
+    };
+
     // Lint document when it's opened
     context.subscriptions.push(
-        vscode.workspace.onDidOpenTextDocument(document => updateDiagnostics(document, diagnostics))
+        vscode.workspace.onDidOpenTextDocument(document => triggerLinting(document))
     );
 
     // Lint document when it's saved
     context.subscriptions.push(
-        vscode.workspace.onDidSaveTextDocument(document => updateDiagnostics(document, diagnostics))
+        vscode.workspace.onDidSaveTextDocument(document => triggerLinting(document))
     );
 
-    // Lint currently active document
+    // Lint document when its content changes
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeTextDocument(event => triggerLinting(event.document))
+    );
+
+    // Lint the active document initially
     if (vscode.window.activeTextEditor) {
-        updateDiagnostics(vscode.window.activeTextEditor.document, diagnostics);
+        triggerLinting(vscode.window.activeTextEditor.document);
     }
 }
 
