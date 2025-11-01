@@ -2,7 +2,10 @@
   "name": "odoo-linter",
   "displayName": "Odoo Linter",
   "description": "A linter for Odoo development in VS Code.",
-  "version": "0.0.1",
+  "version": "0.0.2",
+  "repository": {
+    "url": "https://github.com/maikCyphlock/odoo-linter"
+  },
   "engines": {
     "vscode": "^1.83.0"
   },
