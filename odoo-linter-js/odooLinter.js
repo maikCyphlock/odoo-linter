@@ -26,7 +26,7 @@ class OdooLinter {
             if (fileName.includes('/models/') && fileName.endsWith('__init__.py')) {
                 await this.checkModelImports(diagnostics, document, tree);
             } else if (fileName.endsWith('__manifest__.py')) {
-                this.checkManifest(diagnostics, document, tree);
+                await this.checkManifest(diagnostics, document, tree);
             } else if (fileName.endsWith('.py')) {
                 // Check for unused imports
                 this.checkUnusedImports(diagnostics, document, tree);
@@ -82,64 +82,148 @@ class OdooLinter {
         }
     }
 
-    checkManifest(diagnostics, document, tree) {
+    async checkManifest(diagnostics, document, tree) {
         const dictNodes = this.getNodesByType(tree.rootNode, 'dictionary');
-        if (dictNodes.length > 0) {
-            const dictNode = dictNodes[0]; // Assuming one manifest dict per file
-            const pairNodes = this.getNodesByType(dictNode, 'pair');
-            let hasLicense = false;
-
-            for (const pairNode of pairNodes) {
-                const keyNode = pairNode.childForFieldName('key');
-                if (!keyNode) continue;
-
-                if (keyNode.text === "'author'" || keyNode.text === '"author"') {
-                    const valueNode = pairNode.childForFieldName('value');
-                    if (valueNode && valueNode.text.includes('Odoo S.A.')) {
-                         const range = new vscode.Range(
-                            valueNode.startPosition.row,
-                            valueNode.startPosition.column,
-                            valueNode.endPosition.row,
-                            valueNode.endPosition.column
-                        );
-                        diagnostics.push(new vscode.Diagnostic(
-                            range,
-                            `Module author is 'Odoo S.A.'. Consider changing it to your name or company.`,
-                            vscode.DiagnosticSeverity.Warning
-                        ));
-                    }
-                } else if (keyNode.text === "'license'" || keyNode.text === '"license"') {
-                    hasLicense = true;
-                    const valueNode = pairNode.childForFieldName('value');
-                    const validLicenses = ["'LGPL-3'", "'AGPL-3'", "'OEEL-1'", "'OPL-1'", "'Other OSI approved licence'"];
-                    if (valueNode && !validLicenses.includes(valueNode.text)) {
-                        const range = new vscode.Range(
-                            valueNode.startPosition.row,
-                            valueNode.startPosition.column,
-                            valueNode.endPosition.row,
-                            valueNode.endPosition.column
-                        );
-                        diagnostics.push(new vscode.Diagnostic(
-                            range,
-                            `Invalid license '${valueNode.text}'. Recommended licenses are LGPL-3, AGPL-3, OEEL-1, OPL-1.`,
-                            vscode.DiagnosticSeverity.Warning
-                        ));
-                    }
-                }
+        if (dictNodes.length === 0) {
+            return;
+        }
+        const dictNode = dictNodes[0];
+    
+        const manifest = new Map();
+        const pairNodes = this.getNodesByType(dictNode, 'pair');
+        for (const pairNode of pairNodes) {
+            const keyNode = pairNode.childForFieldName('key');
+            const valueNode = pairNode.childForFieldName('value');
+            if (keyNode && valueNode) {
+                manifest.set(keyNode.text.replace(/['"]/g, ''), { value: valueNode, node: valueNode });
             }
-
-            if (!hasLicense) {
-                const range = new vscode.Range(
+        }
+    
+        // Check for required keys
+        const requiredKeys = ['name', 'version'];
+        for (const key of requiredKeys) {
+            if (!manifest.has(key)) {
+                const range = new this.vscode.Range(
                     dictNode.startPosition.row,
                     dictNode.startPosition.column,
                     dictNode.endPosition.row,
                     dictNode.endPosition.column
                 );
-                diagnostics.push(new vscode.Diagnostic(
+                diagnostics.push(new this.vscode.Diagnostic(
                     range,
-                    `The module manifest is missing the 'license' key.`,
-                    vscode.DiagnosticSeverity.Warning
+                    `The module manifest is missing the '${key}' key.`,
+                    this.vscode.DiagnosticSeverity.Warning
                 ));
+            }
+        }
+    
+        // Check author
+        if (manifest.has('author') && manifest.get('author').value.text.includes('Odoo S.A.')) {
+            const authorNode = manifest.get('author').node;
+            const range = new this.vscode.Range(
+                authorNode.startPosition.row,
+                authorNode.startPosition.column,
+                authorNode.endPosition.row,
+                authorNode.endPosition.column
+            );
+            diagnostics.push(new this.vscode.Diagnostic(
+                range,
+                `Module author is 'Odoo S.A.'. Consider changing it to your name or company.`,
+                this.vscode.DiagnosticSeverity.Warning
+            ));
+        }
+    
+        // Check license
+        if (!manifest.has('license')) {
+            const range = new this.vscode.Range(
+                dictNode.startPosition.row,
+                dictNode.startPosition.column,
+                dictNode.endPosition.row,
+                dictNode.endPosition.column
+            );
+            diagnostics.push(new this.vscode.Diagnostic(
+                range,
+                `The module manifest is missing the 'license' key.`,
+                this.vscode.DiagnosticSeverity.Warning
+            ));
+        } else {
+            const license = manifest.get('license');
+            const validLicenses = ["'LGPL-3'", "'AGPL-3'", "'OEEL-1'", "'OPL-1'", "'Other OSI approved licence'"];
+            if (!validLicenses.includes(license.value.text)) {
+                const range = new this.vscode.Range(
+                    license.node.startPosition.row,
+                    license.node.startPosition.column,
+                    license.node.endPosition.row,
+                    license.node.endPosition.column
+                );
+                diagnostics.push(new this.vscode.Diagnostic(
+                    range,
+                    `Invalid license ${license.value.text}. Recommended licenses are LGPL-3, AGPL-3, OEEL-1, OPL-1.`,
+                    this.vscode.DiagnosticSeverity.Warning
+                ));
+            }
+        }
+    
+        // Check views in manifest
+        const manifestUri = document.uri;
+        const moduleDirUri = this.vscode.Uri.joinPath(manifestUri, '..');
+        const viewsDirUri = this.vscode.Uri.joinPath(moduleDirUri, 'views');
+    
+        try {
+            const viewsDirFiles = await this.vscode.workspace.fs.readDirectory(viewsDirUri);
+            const xmlFilesOnDisk = viewsDirFiles
+                .filter(([fileName, fileType]) => fileType === this.vscode.FileType.File && fileName.endsWith('.xml'))
+                .map(([fileName, fileType]) => `views/${fileName}`);
+    
+            let dataKeyNode = null;
+            if (manifest.has('data')) {
+                dataKeyNode = manifest.get('data').node;
+            } else if (manifest.has('views')) {
+                dataKeyNode = manifest.get('views').node;
+            }
+    
+            if (dataKeyNode) {
+                const manifestFiles = [];
+                if (dataKeyNode.type === 'list') {
+                    for (const child of dataKeyNode.namedChildren) {
+                        if (child.type === 'string') {
+                            manifestFiles.push(child.text.replace(/['"]/g, ''));
+                        }
+                    }
+                }
+    
+                const notInManifest = xmlFilesOnDisk.filter(file => !manifestFiles.includes(file));
+    
+                if (notInManifest.length > 0) {
+                    const range = new this.vscode.Range(
+                        dataKeyNode.startPosition.row,
+                        dataKeyNode.startPosition.column,
+                        dataKeyNode.endPosition.row,
+                        dataKeyNode.endPosition.column
+                    );
+                    diagnostics.push(new this.vscode.Diagnostic(
+                        range,
+                        `The following view files are not declared in the manifest: ${notInManifest.join(', ')}`,
+                        this.vscode.DiagnosticSeverity.Warning
+                    ));
+                }
+            } else if (xmlFilesOnDisk.length > 0) {
+                // has xml files but no data/views key
+                const range = new this.vscode.Range(
+                    dictNode.startPosition.row,
+                    dictNode.startPosition.column,
+                    dictNode.endPosition.row,
+                    dictNode.endPosition.column
+                );
+                diagnostics.push(new this.vscode.Diagnostic(
+                    range,
+                    `The manifest is missing the 'data' key to declare view files.`,
+                    this.vscode.DiagnosticSeverity.Warning
+                ));
+            }
+        } catch (error) {
+            if (!(error instanceof this.vscode.FileSystemError && error.code === 'FileNotFound')) {
+                console.error("Error checking views directory:", error);
             }
         }
     }
