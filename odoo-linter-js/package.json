@@ -16,17 +16,23 @@
   "main": "./extension.js",
   "contributes": {},
   "scripts": {
+    "vscode:prepublish": "npm run prepare",
+    "prepare": "cp node_modules/tree-sitter-python/tree-sitter-python.wasm parsers/",
     "lint": "eslint .",
     "pretest": "npm run lint",
     "test": "node ./test/runTest.js"
   },
   "devDependencies": {
-    "@types/vscode": "^1.83.0",
     "@types/mocha": "^10.0.3",
     "@types/node": "18.x",
+    "@types/vscode": "^1.83.0",
+    "@vscode/test-electron": "^2.3.6",
     "eslint": "^8.52.0",
     "glob": "^10.3.10",
-    "mocha": "^10.2.0",
-    "@vscode/test-electron": "^2.3.6"
+    "mocha": "^10.2.0"
+  },
+  "dependencies": {
+    "tree-sitter-python": "^0.25.0",
+    "web-tree-sitter": "^0.25.10"
   }
 }
