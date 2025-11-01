@@ -155,6 +155,18 @@ async function lintDataFile(document: vscode.TextDocument, odooModuleRoot: vscod
         }
     });
 
+    // Check for views (ir.ui.view)
+    await checkViewDefinitions(document, lines, problems);
+
+    // Check for menuitem definitions
+    await checkMenuItems(document, lines, problems);
+
+    // Check for action definitions
+    await checkActions(document, lines, problems);
+
+    // Check for security file when models are referenced
+    await checkSecurityFile(document, odooModuleRoot, lines, problems);
+
     // Check if file is declared in manifest
     const manifestUri = vscode.Uri.joinPath(odooModuleRoot, '__manifest__.py');
     try {
@@ -183,6 +195,216 @@ async function lintDataFile(document: vscode.TextDocument, odooModuleRoot: vscod
         }
     } catch (error) {
         console.error("Error linting data file:", error);
+    }
+}
+
+async function checkViewDefinitions(document: vscode.TextDocument, lines: string[], problems: vscode.Diagnostic[]): Promise<void> {
+    const fileContent = document.getText();
+
+    // Check for view records
+    const viewRecordPattern = /<record[^>]*model=["']ir\.ui\.view["'][^>]*>/g;
+    let viewMatch;
+    const viewMatches: number[] = [];
+
+    lines.forEach((line, index) => {
+        if (line.includes('model="ir.ui.view"') || line.includes("model='ir.ui.view'")) {
+            viewMatches.push(index);
+
+            // Check if record has an id
+            if (!line.includes('id=')) {
+                // Check next few lines for id
+                let hasId = false;
+                for (let i = Math.max(0, index - 2); i < Math.min(lines.length, index + 3); i++) {
+                    if (lines[i].includes('id=')) {
+                        hasId = true;
+                        break;
+                    }
+                }
+                if (!hasId) {
+                    problems.push({
+                        code: '',
+                        message: 'La vista (ir.ui.view) debe tener un atributo "id" único',
+                        range: new vscode.Range(index, 0, index, line.length),
+                        severity: vscode.DiagnosticSeverity.Error,
+                        source: 'odoo-linter',
+                    });
+                }
+            }
+
+            // Check for required fields in the view
+            const startIndex = index;
+            let endIndex = index;
+            for (let i = index + 1; i < lines.length; i++) {
+                if (lines[i].includes('</record>')) {
+                    endIndex = i;
+                    break;
+                }
+            }
+
+            const viewBlock = lines.slice(startIndex, endIndex + 1).join('\n');
+
+            // Check for name field
+            if (!viewBlock.includes('name="name"') && !viewBlock.includes("name='name'")) {
+                problems.push({
+                    code: '',
+                    message: 'La vista debe tener un campo <field name="name"> con el nombre de la vista',
+                    range: new vscode.Range(index, 0, index, line.length),
+                    severity: vscode.DiagnosticSeverity.Warning,
+                    source: 'odoo-linter',
+                });
+            }
+
+            // Check for model field
+            if (!viewBlock.includes('name="model"') && !viewBlock.includes("name='model'")) {
+                problems.push({
+                    code: '',
+                    message: 'La vista debe tener un campo <field name="model"> especificando el modelo',
+                    range: new vscode.Range(index, 0, index, line.length),
+                    severity: vscode.DiagnosticSeverity.Error,
+                    source: 'odoo-linter',
+                });
+            }
+
+            // Check for arch field
+            if (!viewBlock.includes('name="arch"') && !viewBlock.includes("name='arch'")) {
+                problems.push({
+                    code: '',
+                    message: 'La vista debe tener un campo <field name="arch"> con la estructura de la vista',
+                    range: new vscode.Range(index, 0, index, line.length),
+                    severity: vscode.DiagnosticSeverity.Error,
+                    source: 'odoo-linter',
+                });
+            }
+        }
+    });
+}
+
+async function checkMenuItems(document: vscode.TextDocument, lines: string[], problems: vscode.Diagnostic[]): Promise<void> {
+    lines.forEach((line, index) => {
+        if (line.includes('<menuitem') && !line.includes('/>') && !line.includes('</menuitem>')) {
+            // Check if menuitem has required attributes
+            if (!line.includes('id=')) {
+                problems.push({
+                    code: '',
+                    message: 'El menuitem debe tener un atributo "id" único',
+                    range: new vscode.Range(index, 0, index, line.length),
+                    severity: vscode.DiagnosticSeverity.Error,
+                    source: 'odoo-linter',
+                });
+            }
+
+            if (!line.includes('name=')) {
+                problems.push({
+                    code: '',
+                    message: 'El menuitem debe tener un atributo "name" descriptivo',
+                    range: new vscode.Range(index, 0, index, line.length),
+                    severity: vscode.DiagnosticSeverity.Warning,
+                    source: 'odoo-linter',
+                });
+            }
+
+            // Check if it has action or parent
+            if (!line.includes('action=') && !line.includes('parent=')) {
+                problems.push({
+                    code: '',
+                    message: 'El menuitem debe tener un atributo "action" o "parent"',
+                    range: new vscode.Range(index, 0, index, line.length),
+                    severity: vscode.DiagnosticSeverity.Warning,
+                    source: 'odoo-linter',
+                });
+            }
+        }
+    });
+}
+
+async function checkActions(document: vscode.TextDocument, lines: string[], problems: vscode.Diagnostic[]): Promise<void> {
+    lines.forEach((line, index) => {
+        // Check for action records (ir.actions.act_window)
+        if (line.includes('model="ir.actions.act_window"') || line.includes("model='ir.actions.act_window'")) {
+            // Check for required fields in action
+            const startIndex = index;
+            let endIndex = index;
+            for (let i = index + 1; i < lines.length; i++) {
+                if (lines[i].includes('</record>')) {
+                    endIndex = i;
+                    break;
+                }
+            }
+
+            const actionBlock = lines.slice(startIndex, endIndex + 1).join('\n');
+
+            // Check for name field
+            if (!actionBlock.includes('name="name"') && !actionBlock.includes("name='name'")) {
+                problems.push({
+                    code: '',
+                    message: 'La acción debe tener un campo <field name="name">',
+                    range: new vscode.Range(index, 0, index, line.length),
+                    severity: vscode.DiagnosticSeverity.Warning,
+                    source: 'odoo-linter',
+                });
+            }
+
+            // Check for res_model field
+            if (!actionBlock.includes('name="res_model"') && !actionBlock.includes("name='res_model'")) {
+                problems.push({
+                    code: '',
+                    message: 'La acción debe tener un campo <field name="res_model"> especificando el modelo',
+                    range: new vscode.Range(index, 0, index, line.length),
+                    severity: vscode.DiagnosticSeverity.Error,
+                    source: 'odoo-linter',
+                });
+            }
+
+            // Check for view_mode field
+            if (!actionBlock.includes('name="view_mode"') && !actionBlock.includes("name='view_mode'")) {
+                problems.push({
+                    code: '',
+                    message: 'La acción debe tener un campo <field name="view_mode"> (ej: tree,form)',
+                    range: new vscode.Range(index, 0, index, line.length),
+                    severity: vscode.DiagnosticSeverity.Warning,
+                    source: 'odoo-linter',
+                });
+            }
+        }
+    });
+}
+
+async function checkSecurityFile(document: vscode.TextDocument, odooModuleRoot: vscode.Uri, lines: string[], problems: vscode.Diagnostic[]): Promise<void> {
+    const fileContent = document.getText();
+    
+    // Check if there are model references or views in the file
+    const hasModelReferences = fileContent.includes('model=') || fileContent.includes('ir.ui.view');
+    
+    if (hasModelReferences) {
+        // Check if security directory exists
+        const securityDirUri = vscode.Uri.joinPath(odooModuleRoot, 'security');
+        try {
+            await vscode.workspace.fs.stat(securityDirUri);
+            
+            // Check if ir.model.access.csv exists
+            const accessCsvUri = vscode.Uri.joinPath(securityDirUri, 'ir.model.access.csv');
+            try {
+                await vscode.workspace.fs.stat(accessCsvUri);
+            } catch {
+                // ir.model.access.csv doesn't exist
+                problems.push({
+                    code: '',
+                    message: 'El módulo contiene modelos pero no tiene el archivo security/ir.model.access.csv',
+                    range: new vscode.Range(0, 0, 0, 1),
+                    severity: vscode.DiagnosticSeverity.Warning,
+                    source: 'odoo-linter',
+                });
+            }
+        } catch {
+            // Security directory doesn't exist
+            problems.push({
+                code: '',
+                message: 'El módulo contiene modelos pero no tiene el directorio security/',
+                range: new vscode.Range(0, 0, 0, 1),
+                severity: vscode.DiagnosticSeverity.Warning,
+                source: 'odoo-linter',
+            });
+        }
     }
 }
 
