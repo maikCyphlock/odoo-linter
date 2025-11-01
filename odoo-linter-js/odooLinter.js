@@ -1,8 +1,9 @@
 const vscode = require('vscode');
 
 class OdooLinter {
-    constructor(parser) {
+    constructor(parser, vscode) {
         this.parser = parser;
+        this.vscode = vscode;
     }
 
     async lintDocument(document) {
@@ -22,7 +23,9 @@ class OdooLinter {
 
             const fileName = document.uri.fsPath;
 
-            if (fileName.endsWith('__manifest__.py')) {
+            if (fileName.includes('/models/') && fileName.endsWith('__init__.py')) {
+                await this.checkModelImports(diagnostics, document, tree);
+            } else if (fileName.endsWith('__manifest__.py')) {
                 this.checkManifest(diagnostics, document, tree);
             } else if (fileName.endsWith('.py')) {
                 // Check for unused imports
@@ -36,6 +39,46 @@ class OdooLinter {
         } catch (error) {
             console.error('Error parsing document:', error);
             return [];
+        }
+    }
+
+    async checkModelImports(diagnostics, document, tree) {
+        const initUri = document.uri;
+        const modelsDirUri = this.vscode.Uri.joinPath(initUri, '..');
+    
+        // 1. Get all python files in the models directory
+        const allFiles = await this.vscode.workspace.fs.readDirectory(modelsDirUri);
+        const pythonFiles = allFiles
+            .filter(([fileName, fileType]) => fileType === this.vscode.FileType.File && fileName.endsWith('.py') && fileName !== '__init__.py')
+            .map(([fileName, fileType]) => fileName.replace('.py', ''));
+    
+        // 2. Get all imported modules from the __init__.py file
+        const importedModules = new Set();
+        const importNodes = this.getNodesByType(tree.rootNode, 'import_from_statement');
+        for (const importNode of importNodes) {
+            // looking for `from . import my_module`
+            const moduleNameNode = importNode.childForFieldName('module_name');
+            if (moduleNameNode && moduleNameNode.text === '.') {
+                const importList = importNode.childForFieldName('name');
+                if (importList) {
+                    for (const importName of importList.namedChildren) {
+                        importedModules.add(importName.text);
+                    }
+                }
+            }
+        }
+    
+        // 3. Find the difference
+        const notImportedFiles = pythonFiles.filter(fileName => !importedModules.has(fileName));
+    
+        // 4. Create diagnostics for each non-imported file
+        if (notImportedFiles.length > 0) {
+            const range = new this.vscode.Range(0, 0, 0, 10); // Report at the top of the file
+            diagnostics.push(new this.vscode.Diagnostic(
+                range,
+                `The following models are not imported in __init__.py: ${notImportedFiles.join(', ')}`,
+                this.vscode.DiagnosticSeverity.Warning
+            ));
         }
     }
 

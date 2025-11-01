@@ -33,7 +33,7 @@ async function activate(context) {
         console.log('Parser initialized successfully');
         
         // Create Odoo linter instance
-        const odooLinter = new OdooLinter(parser);
+        const odooLinter = new OdooLinter(parser, vscode);
         
         // Create diagnostic collection
         const diagnostics = vscode.languages.createDiagnosticCollection("odoo-linter");
