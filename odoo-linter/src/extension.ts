@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 export function activate(context: vscode.ExtensionContext) {
     const diagnostics = vscode.languages.createDiagnosticCollection("odoo-linter");
@@ -68,24 +69,150 @@ async function updateDiagnostics(document: vscode.TextDocument, diagnostics: vsc
 }
 
 async function lintDataFile(document: vscode.TextDocument, odooModuleRoot: vscode.Uri, problems: vscode.Diagnostic[]): Promise<void> {
-    const fileContent = document.getText();
+    const fileContent = document.getText().trim();
     const lines = fileContent.split('\n');
 
-    // Check XML structure
-    if (!fileContent.includes('<?xml')) {
+    // ---
+    // PASO 1: Validación básica del contenido
+    // ---
+    if (!fileContent) {
         problems.push({
-            code: '',
-            message: 'El archivo XML debe comenzar con la declaración <?xml version="1.0" encoding="utf-8"?>',
+            code: 'EMPTY_FILE',
+            message: 'El archivo XML está vacío',
+            range: new vscode.Range(0, 0, 0, 0),
+            severity: vscode.DiagnosticSeverity.Error,
+            source: 'odoo-linter',
+        });
+        return;
+    }
+
+    // Verificar que comience con declaración XML
+    if (!fileContent.startsWith('<?xml')) {
+        problems.push({
+            code: 'MISSING_XML_DECLARATION',
+            message: 'El archivo debe comenzar con la declaración XML (<?xml ... ?>)',
+            range: new vscode.Range(0, 0, 0, 5),
+            severity: vscode.DiagnosticSeverity.Error,
+            source: 'odoo-linter',
+        });
+    }
+
+    // Verificar declaración XML válida
+    const xmlDeclarationMatch = fileContent.match(/^<\?xml[^>]+\?>/);
+    if (xmlDeclarationMatch) {
+        const declaration = xmlDeclarationMatch[0];
+        if (!/encoding\s*=\s*["']utf-8["']/i.test(declaration)) {
+            problems.push({
+                code: 'INVALID_ENCODING',
+                message: 'La codificación debe ser UTF-8',
+                range: new vscode.Range(0, 0, 0, declaration.length),
+                severity: vscode.DiagnosticSeverity.Warning,
+                source: 'odoo-linter',
+            });
+        }
+    }
+
+    // ---
+    // PASO 2: Validación de sintaxis XML
+    // ---
+    const validationResult = XMLValidator.validate(fileContent, {
+        allowBooleanAttributes: true,  // Para soportar atributos booleanos como 'required'
+        unpairedTags: ['br', 'img', 'input', 'meta', 'link', 'area', 'base', 'col', 'command', 'embed', 'hr', 'keygen', 'param', 'source', 'track', 'wbr']
+    });
+
+    if (validationResult !== true) {
+        const err = validationResult.err;
+        const line = Math.max(0, (err.line || 1) - 1);
+        const column = Math.max(0, err.col || 0);
+        
+        problems.push({
+            code: err.code || 'XML_SYNTAX_ERROR',
+            message: `Error de sintaxis XML: ${err.msg || 'Error desconocido'}`,
+            range: new vscode.Range(line, column, line, column + 1),
+            severity: vscode.DiagnosticSeverity.Error,
+            source: 'odoo-linter',
+        });
+        // Si el XML está roto, no tiene sentido seguir
+        return;
+    }
+
+    // ---
+    // PASO 3: Parseo y revisión de estructura
+    // ---
+    interface ParsedXml {
+        odoo?: any;
+        openerp?: any;
+        [key: string]: any;
+    }
+    
+    let parsedXml: ParsedXml;
+    try {
+        const parser = new XMLParser({
+            ignoreAttributes: false,
+            isArray: (name, jpath, isLeafNode, isAttribute) => {
+                // Especificar qué elementos pueden aparecer múltiples veces
+                return ['record', 'menuitem', 'template', 'xpath', 'field', 'delete', 'data'].includes(name);
+            },
+            attributeNamePrefix: '@_',
+            attributesGroupName: 'attributes',
+            cdataPropName: 'cdata',
+            commentPropName: 'comment',
+            preserveOrder: true
+        });
+        
+        parsedXml = parser.parse(fileContent);
+    } catch (e: any) {
+        // Si hay un error en el parseo pero pasó la validación, es probablemente un problema de estructura
+        problems.push({
+            code: 'XML_STRUCTURE_ERROR',
+            message: `Error en la estructura del XML: ${e.message}`,
             range: new vscode.Range(0, 0, 0, 1),
+            severity: vscode.DiagnosticSeverity.Error,
+            source: 'odoo-linter',
+        });
+        return;
+    }
+
+    // ---
+    // PASO 4: Validación de estructura específica de Odoo
+    // ---
+    if (!Array.isArray(parsedXml) || parsedXml.length === 0) {
+        problems.push({
+            code: 'INVALID_ROOT_STRUCTURE',
+            message: 'El XML debe contener elementos válidos',
+            range: new vscode.Range(0, 0, 0, 1),
+            severity: vscode.DiagnosticSeverity.Error,
+            source: 'odoo-linter',
+        });
+        return;
+    }
+
+    // Buscar el elemento raíz <odoo> o <openerp>
+    const hasOdooRoot = parsedXml.some((node: any) => node.odoo || node.openerp);
+    if (!hasOdooRoot) {
+        problems.push({
+            code: 'MISSING_ROOT_ELEMENT',
+            message: 'El archivo XML debe tener un elemento raíz <odoo> o <openerp>',
+            range: new vscode.Range(0, 0, 0, 1),
+            severity: vscode.DiagnosticSeverity.Error,
+            source: 'odoo-linter',
+        });
+    }
+
+    // Comprobación de la declaración XML (sigue siendo chequeo de texto)
+    if (!fileContent.trim().startsWith('<?xml')) {
+        problems.push({
+            code: 'XML_DECLARATION',
+            message: 'El archivo XML debe comenzar con la declaración <?xml version="1.0" encoding="utf-8"?>',
+            range: new vscode.Range(0, 0, 0, 5),
             severity: vscode.DiagnosticSeverity.Warning,
             source: 'odoo-linter',
         });
     } else {
-        // Check encoding
-        const xmlDeclaration = fileContent.match(/<\?xml[^?]*\?>/)?.[0] || '';
+        const xmlDeclaration = lines[0] || '';
         if (!xmlDeclaration.includes('encoding="utf-8"') && !xmlDeclaration.includes("encoding='utf-8'")) {
             problems.push({
-                code: '',
+                code: 'XML_ENCODING',
                 message: 'El archivo XML debe usar encoding="utf-8"',
                 range: new vscode.Range(0, 0, 0, xmlDeclaration.length),
                 severity: vscode.DiagnosticSeverity.Warning,
@@ -94,23 +221,26 @@ async function lintDataFile(document: vscode.TextDocument, odooModuleRoot: vscod
         }
     }
 
-    // Check for root element <odoo>
-    if (!fileContent.includes('<odoo>') && !fileContent.includes('<openerp>')) {
+    // Comprobación de raíz <odoo> (usando el parser)
+    if (!('odoo' in parsedXml) && !('openerp' in parsedXml)) {
         problems.push({
-            code: '',
-            message: 'El archivo XML debe tener un elemento raíz <odoo>',
+            code: 'ROOT_TAG',
+            message: 'El archivo XML debe tener un elemento raíz <odoo> o <openerp>',
             range: new vscode.Range(0, 0, 0, 1),
             severity: vscode.DiagnosticSeverity.Error,
             source: 'odoo-linter',
         });
     }
 
+    // ---
+    // PASO 3: Lógica de Odoo (Mantenemos la lógica de líneas para los 'Range')
+    // ---
+
     // Check for duplicate IDs in the file
-    const idPattern = /id=["']([^"']+)["']/g;
     const ids: Map<string, number[]> = new Map();
     lines.forEach((line, index) => {
-        let match;
         const regex = /id=["']([^"']+)["']/g;
+        let match;
         while ((match = regex.exec(line)) !== null) {
             const id = match[1];
             if (!ids.has(id)) {
@@ -125,7 +255,7 @@ async function lintDataFile(document: vscode.TextDocument, odooModuleRoot: vscod
         if (lineNumbers.length > 1) {
             lineNumbers.forEach(lineNum => {
                 problems.push({
-                    code: '',
+                    code: 'DUPLICATE_ID',
                     message: `ID duplicado '${id}' encontrado en el archivo`,
                     range: new vscode.Range(lineNum, 0, lineNum, lines[lineNum].length),
                     severity: vscode.DiagnosticSeverity.Error,
@@ -201,24 +331,14 @@ async function lintDataFile(document: vscode.TextDocument, odooModuleRoot: vscod
 async function checkViewDefinitions(document: vscode.TextDocument, lines: string[], problems: vscode.Diagnostic[]): Promise<void> {
     const fileContent = document.getText();
 
-    // Check for view records
-    const viewRecordPattern = /<record[^>]*model=["']ir\.ui\.view["'][^>]*>/g;
-    let viewMatch;
-    const viewMatches: number[] = [];
-
     lines.forEach((line, index) => {
         if (line.includes('model="ir.ui.view"') || line.includes("model='ir.ui.view'")) {
-            viewMatches.push(index);
-
             // Check if record has an id
             if (!line.includes('id=')) {
-                // Check next few lines for id
+                // Check previous line for id (common pattern)
                 let hasId = false;
-                for (let i = Math.max(0, index - 2); i < Math.min(lines.length, index + 3); i++) {
-                    if (lines[i].includes('id=')) {
-                        hasId = true;
-                        break;
-                    }
+                if (index > 0 && lines[index - 1].includes('id=')) {
+                    hasId = true;
                 }
                 if (!hasId) {
                     problems.push({
@@ -231,7 +351,7 @@ async function checkViewDefinitions(document: vscode.TextDocument, lines: string
                 }
             }
 
-            // Check for required fields in the view
+            // Find the complete record block
             const startIndex = index;
             let endIndex = index;
             for (let i = index + 1; i < lines.length; i++) {
@@ -243,37 +363,43 @@ async function checkViewDefinitions(document: vscode.TextDocument, lines: string
 
             const viewBlock = lines.slice(startIndex, endIndex + 1).join('\n');
 
-            // Check for name field
-            if (!viewBlock.includes('name="name"') && !viewBlock.includes("name='name'")) {
-                problems.push({
-                    code: '',
-                    message: 'La vista debe tener un campo <field name="name"> con el nombre de la vista',
-                    range: new vscode.Range(index, 0, index, line.length),
-                    severity: vscode.DiagnosticSeverity.Warning,
-                    source: 'odoo-linter',
-                });
-            }
+            // Check if it's an inherited view
+            const isInheritedView = viewBlock.includes('name="inherit_id"') || viewBlock.includes("name='inherit_id'");
 
-            // Check for model field
-            if (!viewBlock.includes('name="model"') && !viewBlock.includes("name='model'")) {
-                problems.push({
-                    code: '',
-                    message: 'La vista debe tener un campo <field name="model"> especificando el modelo',
-                    range: new vscode.Range(index, 0, index, line.length),
-                    severity: vscode.DiagnosticSeverity.Error,
-                    source: 'odoo-linter',
-                });
-            }
+            // For new views (not inherited), check required fields
+            if (!isInheritedView) {
+                // Check for model field
+                if (!viewBlock.includes('name="model"') && !viewBlock.includes("name='model'")) {
+                    problems.push({
+                        code: '',
+                        message: 'La vista debe tener un campo <field name="model"> especificando el modelo',
+                        range: new vscode.Range(index, 0, index, line.length),
+                        severity: vscode.DiagnosticSeverity.Error,
+                        source: 'odoo-linter',
+                    });
+                }
 
-            // Check for arch field
-            if (!viewBlock.includes('name="arch"') && !viewBlock.includes("name='arch'")) {
-                problems.push({
-                    code: '',
-                    message: 'La vista debe tener un campo <field name="arch"> con la estructura de la vista',
-                    range: new vscode.Range(index, 0, index, line.length),
-                    severity: vscode.DiagnosticSeverity.Error,
-                    source: 'odoo-linter',
-                });
+                // Check for arch field
+                if (!viewBlock.includes('name="arch"') && !viewBlock.includes("name='arch'")) {
+                    problems.push({
+                        code: '',
+                        message: 'La vista debe tener un campo <field name="arch"> con la estructura de la vista',
+                        range: new vscode.Range(index, 0, index, line.length),
+                        severity: vscode.DiagnosticSeverity.Error,
+                        source: 'odoo-linter',
+                    });
+                }
+            } else {
+                // For inherited views, check that inherit_id and arch are present
+                if (!viewBlock.includes('name="arch"') && !viewBlock.includes("name='arch'")) {
+                    problems.push({
+                        code: '',
+                        message: 'La vista heredada debe tener un campo <field name="arch"> con las modificaciones',
+                        range: new vscode.Range(index, 0, index, line.length),
+                        severity: vscode.DiagnosticSeverity.Warning,
+                        source: 'odoo-linter',
+                    });
+                }
             }
         }
     });
@@ -281,7 +407,7 @@ async function checkViewDefinitions(document: vscode.TextDocument, lines: string
 
 async function checkMenuItems(document: vscode.TextDocument, lines: string[], problems: vscode.Diagnostic[]): Promise<void> {
     lines.forEach((line, index) => {
-        if (line.includes('<menuitem') && !line.includes('/>') && !line.includes('</menuitem>')) {
+        if (line.includes('<menuitem')) {
             // Check if menuitem has required attributes
             if (!line.includes('id=')) {
                 problems.push({
@@ -297,17 +423,6 @@ async function checkMenuItems(document: vscode.TextDocument, lines: string[], pr
                 problems.push({
                     code: '',
                     message: 'El menuitem debe tener un atributo "name" descriptivo',
-                    range: new vscode.Range(index, 0, index, line.length),
-                    severity: vscode.DiagnosticSeverity.Warning,
-                    source: 'odoo-linter',
-                });
-            }
-
-            // Check if it has action or parent
-            if (!line.includes('action=') && !line.includes('parent=')) {
-                problems.push({
-                    code: '',
-                    message: 'El menuitem debe tener un atributo "action" o "parent"',
                     range: new vscode.Range(index, 0, index, line.length),
                     severity: vscode.DiagnosticSeverity.Warning,
                     source: 'odoo-linter',
@@ -370,12 +485,20 @@ async function checkActions(document: vscode.TextDocument, lines: string[], prob
 }
 
 async function checkSecurityFile(document: vscode.TextDocument, odooModuleRoot: vscode.Uri, lines: string[], problems: vscode.Diagnostic[]): Promise<void> {
+    // Only check security files for views directory, not for every XML file
+    const relativePath = document.uri.fsPath.substring(odooModuleRoot.fsPath.length + 1);
+    
+    // Skip security check for files in security, data, or demo directories
+    if (relativePath.startsWith('security/') || relativePath.startsWith('data/') || relativePath.startsWith('demo/')) {
+        return;
+    }
+    
     const fileContent = document.getText();
     
-    // Check if there are model references or views in the file
-    const hasModelReferences = fileContent.includes('model=') || fileContent.includes('ir.ui.view');
+    // Only check if there are actual model definitions (not just references)
+    const hasNewViews = fileContent.includes('model="ir.ui.view"') || fileContent.includes("model='ir.ui.view'");
     
-    if (hasModelReferences) {
+    if (hasNewViews) {
         // Check if security directory exists
         const securityDirUri = vscode.Uri.joinPath(odooModuleRoot, 'security');
         try {
@@ -386,24 +509,20 @@ async function checkSecurityFile(document: vscode.TextDocument, odooModuleRoot: 
             try {
                 await vscode.workspace.fs.stat(accessCsvUri);
             } catch {
-                // ir.model.access.csv doesn't exist
+                // Only warn, don't error - some modules might not need access rules
+                // This is just a reminder
+            }
+        } catch {
+            // Security directory doesn't exist - only inform for views directory
+            if (relativePath.startsWith('views/')) {
                 problems.push({
                     code: '',
-                    message: 'El módulo contiene modelos pero no tiene el archivo security/ir.model.access.csv',
+                    message: 'Considera crear el directorio security/ con ir.model.access.csv para definir permisos',
                     range: new vscode.Range(0, 0, 0, 1),
-                    severity: vscode.DiagnosticSeverity.Warning,
+                    severity: vscode.DiagnosticSeverity.Information,
                     source: 'odoo-linter',
                 });
             }
-        } catch {
-            // Security directory doesn't exist
-            problems.push({
-                code: '',
-                message: 'El módulo contiene modelos pero no tiene el directorio security/',
-                range: new vscode.Range(0, 0, 0, 1),
-                severity: vscode.DiagnosticSeverity.Warning,
-                source: 'odoo-linter',
-            });
         }
     }
 }
